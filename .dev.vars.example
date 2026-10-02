@@ -1,0 +1,6 @@
+# 複製成 .dev.vars 給本機開發用（.dev.vars 不進 git）
+# 只在 localhost 生效：略過 Cloudflare Access 驗證
+ACCESS_DEV_BYPASS=true
+# 正式環境用 wrangler secret put 設定，不要寫進 wrangler.jsonc
+# ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com
+# ACCESS_AUD=<Access application 的 AUD tag>

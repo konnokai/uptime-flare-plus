@@ -1,0 +1,159 @@
+/* 通知、維護、公告、設定共用的「清單 + 編輯面板」版面，全部掛在 .crud 底下避免外漏 */
+
+.crud {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  max-width: 1180px;
+}
+
+.crud h1 {
+  font-size: var(--fs-xl);
+}
+
+.crud h2 {
+  font-size: var(--fs-lg);
+}
+
+.crud .small {
+  font-size: var(--fs-sm);
+}
+
+.crud .page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crud .page-head p {
+  margin-top: 4px;
+}
+
+.crud .layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.crud .layout.editing {
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+}
+
+.crud .list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.crud .empty {
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--ink-2);
+}
+
+.crud .rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.crud .row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.crud .row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.crud .row.current {
+  background: color-mix(in srgb, var(--ink) 6%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.crud .row.off .name {
+  color: var(--ink-3);
+}
+
+.crud .row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.crud .row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.crud .name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.crud .flag {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.crud .flag::before {
+  content: "· ";
+  color: var(--ink-3);
+}
+
+.crud .row-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.crud .editor {
+  position: sticky;
+  top: 20px;
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.crud .checks {
+  display: grid;
+  gap: 10px;
+}
+
+@media (max-width: 1100px) {
+  .crud .layout.editing {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .crud .layout.editing .editor {
+    position: static;
+    order: -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .crud .row {
+    flex-direction: column;
+  }
+  .crud .row-actions {
+    align-self: flex-end;
+  }
+  .crud .editor {
+    padding: 14px;
+  }
+}
