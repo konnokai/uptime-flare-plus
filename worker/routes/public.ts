@@ -17,6 +17,7 @@ import {
   sumDaily,
   uptimeRatio,
   uptimeSince,
+  withTimeout,
 } from '../db';
 import { monitorStub, type Env } from '../env';
 import { currentWindow, nextWindow } from '../maintenance';
@@ -25,6 +26,8 @@ import { lastNDays } from '../time';
 const DAY_MS = 86_400_000;
 const STATUS_CACHE_TTL_S = 30;
 const MAX_PING_MS = 100_000_000_000;
+/** 舊 token 由 DO 擋掉，快取放久一點也沒關係 */
+const PUSH_TOKEN_CACHE_TTL_S = 7 * 86_400;
 
 export const STATUS_PATH = '/api/status';
 
@@ -146,16 +149,31 @@ async function handlePush(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  const id = await findPushMonitorId(c.env.DB, token);
+  const input = { token, status, msg, ping } as const;
+
+  // 先查快取，D1 故障時已經 push 過的服務才不會被誤判成 down
+  const cacheKey = new Request(new URL(`/__push-token/${encodeURIComponent(token)}`, c.req.url).toString());
+  const cached = await caches.default.match(cacheKey);
+  if (cached) {
+    if (await monitorStub(c.env, Number(await cached.text())).push(input)) return c.json({ ok: true });
+    // token 換過、monitor 停用或刪除，或 DO 還沒設定：丟掉快取，照 D1 的結果走
+    await caches.default.delete(cacheKey);
+  }
+
+  const id = await withTimeout(findPushMonitorId(c.env.DB, token));
   if (id === null) return c.json({ ok: false, msg: 'Monitor not found or not active.' }, 404);
   const stub = monitorStub(c.env, id);
-  let accepted = await stub.push({ status, msg, ping });
+  let accepted = await stub.push(input);
   if (!accepted) {
     // D1 說存在但 DO 沒設定（例如設定時 DO 呼叫失敗）：補一次 configure 再試
-    await stub.configure(id);
-    accepted = await stub.push({ status, msg, ping });
+    await withTimeout(stub.configure(id));
+    accepted = await stub.push(input);
   }
   if (!accepted) return c.json({ ok: false, msg: 'Monitor not found or not active.' }, 404);
+  await caches.default.put(
+    cacheKey,
+    new Response(String(id), { headers: { 'cache-control': `max-age=${PUSH_TOKEN_CACHE_TTL_S}` } }),
+  );
   return c.json({ ok: true });
 }
 

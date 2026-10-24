@@ -6,7 +6,9 @@ import {
   getMonitor,
   getSettings,
   maintenancesForMonitor,
-  writeHeartbeat,
+  withTimeout,
+  writeHeartbeats,
+  type HeartbeatWrite,
 } from './db';
 import type { Env } from './env';
 import { inMaintenance, type MaintenanceRule } from './maintenance';
@@ -16,6 +18,10 @@ import { dayKey } from './time';
 /** Kuma 的做法：push 逾時判斷多給 1 秒緩衝，避免剛好在邊界上的 push 被判逾時 */
 export const PUSH_BUFFER_MS = 1000;
 const FIRST_CHECK_DELAY_MS = 1000;
+/** D1 故障時暫存的心跳上限，超過就丟最舊的 */
+const MAX_PENDING_BEATS = 500;
+/** 每次寫入最多順便補寫幾筆，免得一次送太大的 batch 給剛恢復的 D1 */
+const FLUSH_BEATS = 100;
 
 export interface MonitorConfig {
   monitorId: number;
@@ -36,6 +42,8 @@ export interface MonitorState {
 }
 
 export interface PushInput {
+  /** Worker 可能是從快取查到 monitor id，token 對不對由 DO 決定 */
+  token: string;
   status: 'up' | 'down';
   msg: string;
   ping: number | null;
@@ -140,7 +148,9 @@ export class MonitorDO extends DurableObject<Env> {
 
   async push(input: PushInput): Promise<boolean> {
     const cfg = this.config;
-    if (!cfg || !cfg.monitor.active || cfg.monitor.type !== 'push') return false;
+    if (!cfg || !cfg.monitor.active || cfg.monitor.type !== 'push' || cfg.monitor.pushToken !== input.token) {
+      return false;
+    }
     const now = Date.now();
     this.ctx.storage.kv.put('state', { ...this.state, lastPushAt: now });
     const nextAt = now + cfg.monitor.intervalS * 1000 + PUSH_BUFFER_MS;
@@ -221,21 +231,15 @@ export class MonitorDO extends DurableObject<Env> {
     this.ctx.storage.kv.put('state', next);
     await this.ctx.storage.setAlarm(nextAlarmAt);
 
-    let exists = true;
-    try {
-      exists = await writeHeartbeat(this.env.DB, {
-        monitorId: cfg.monitorId,
-        ts: now,
-        status,
-        latencyMs: latencyMs === null ? null : Math.round(latencyMs),
-        msg,
-        important: prev.status !== status,
-        day: dayKey(now, cfg.timezone),
-      });
-    } catch (err) {
-      // 不往外丟：alarm 失敗會被系統重試，造成重複心跳
-      console.error('writeHeartbeat failed', cfg.monitorId, err);
-    }
+    const exists = await this.writeBeat({
+      monitorId: cfg.monitorId,
+      ts: now,
+      status,
+      latencyMs: latencyMs === null ? null : Math.round(latencyMs),
+      msg,
+      important: prev.status !== status,
+      day: dayKey(now, cfg.timezone),
+    });
     if (!exists) {
       // monitor 已被刪除或停用，但這個 DO 沒收到通知；停掉排程，等 configure 決定。
       // 等 D1 的期間若有新的 configure（例如暫停後又恢復），它排的 alarm 要保留
@@ -255,12 +259,33 @@ export class MonitorDO extends DurableObject<Env> {
     }
   }
 
+  /** 連同之前寫失敗的心跳一起寫；這次也失敗就先存著，D1 恢復後再補 */
+  private async writeBeat(beat: HeartbeatWrite): Promise<boolean> {
+    // 取出和刪除之間沒有 await，同時進來的 push 和 alarm 不會拿到同一批
+    const queued = this.ctx.storage.kv.get<HeartbeatWrite[]>('pendingBeats') ?? [];
+    const batch = [...queued.slice(0, FLUSH_BEATS), beat];
+    const rest = queued.slice(FLUSH_BEATS);
+    if (rest.length > 0) this.ctx.storage.kv.put('pendingBeats', rest);
+    else this.ctx.storage.kv.delete('pendingBeats');
+    try {
+      return await withTimeout(writeHeartbeats(this.env.DB, batch));
+    } catch (err) {
+      // 不往外丟：alarm 失敗會被系統重試，造成重複心跳
+      console.error('writeHeartbeat failed', beat.monitorId, err);
+      const merged = [...batch, ...(this.ctx.storage.kv.get<HeartbeatWrite[]>('pendingBeats') ?? [])];
+      merged.sort((a, b) => a.ts - b.ts);
+      this.ctx.storage.kv.put('pendingBeats', merged.slice(-MAX_PENDING_BEATS));
+      // 不確定 monitor 還在不在，當作在，照常排程和通知
+      return true;
+    }
+  }
+
   private async notify(
     cfg: MonitorConfig,
     info: { status: Status; msg: string; latencyMs: number | null; ts: number; resend: boolean },
   ): Promise<void> {
     try {
-      const channels = await activeNotificationsForMonitor(this.env.DB, cfg.monitorId);
+      const channels = await withTimeout(activeNotificationsForMonitor(this.env.DB, cfg.monitorId));
       const payload = statusMessage({
         monitorName: cfg.monitor.name,
         target: cfg.monitor.type === 'http' ? cfg.monitor.url : 'Push',

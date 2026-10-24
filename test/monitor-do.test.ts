@@ -1,6 +1,7 @@
 import { env, runDurableObjectAlarm } from 'cloudflare:test';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { STATUS, type Heartbeat } from '../shared/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { STATUS, type Heartbeat, type Monitor } from '../shared/types';
+import { withTimeout } from '../worker/db';
 import { monitorStub } from '../worker/env';
 import { api, createDiscord, createMonitor, mockFetch, type FetchMock } from './helpers';
 
@@ -113,6 +114,59 @@ describe('push monitor', () => {
   it('rejects invalid ping', async () => {
     const m = await createMonitor({ type: 'push' });
     expect((await push(m.pushToken!, '?ping=abc')).status).toBe(404);
+  });
+});
+
+describe('D1 outage', () => {
+  it('push still works with D1 down once the token is cached', async () => {
+    const m = await createMonitor({ type: 'push' });
+    expect((await push(m.pushToken!)).status).toBe(200);
+
+    const down = vi.spyOn(env.DB, 'prepare').mockImplementation(() => {
+      throw new Error('D1 down');
+    });
+    try {
+      const res = await push(m.pushToken!, '?msg=during');
+      expect(res).toEqual({ status: 200, body: { ok: true } });
+    } finally {
+      down.mockRestore();
+    }
+    expect((await monitorStub(env, m.id).getSnapshot()).state.status).toBe(STATUS.UP);
+  });
+
+  it('rejects a cached token after it is regenerated', async () => {
+    const m = await createMonitor({ type: 'push' });
+    await push(m.pushToken!);
+    const res = await api<Monitor>(`/api/admin/monitors/${m.id}/regenerate-token`, { method: 'POST' });
+    expect((await push(m.pushToken!)).status).toBe(404);
+    expect((await push(res.body.pushToken!)).status).toBe(200);
+  });
+
+  it('falls back to D1 when the cached monitor rejects the push', async () => {
+    const m = await createMonitor({ type: 'push' });
+    await push(m.pushToken!);
+    // 模擬 DO 的設定不見了：快取還指向它，要改走 D1 並重新 configure
+    await monitorStub(env, m.id).destroy();
+    expect(await push(m.pushToken!)).toEqual({ status: 200, body: { ok: true } });
+    expect((await monitorStub(env, m.id).getSnapshot()).state.status).toBe(STATUS.UP);
+  });
+
+  it('keeps failed heartbeat writes and writes them with the next one', async () => {
+    const m = await createMonitor({ type: 'push' });
+    const fail = vi.spyOn(env.DB, 'batch').mockRejectedValueOnce(new Error('D1 down'));
+    await push(m.pushToken!, '?msg=first');
+    fail.mockRestore();
+    expect(await beats(m.id)).toHaveLength(0);
+
+    await push(m.pushToken!, '?msg=second');
+    expect((await beats(m.id)).map((b) => b.msg)).toEqual(['first', 'second']);
+    const stats = await api<{ daily: { up: number }[] }>(`/api/admin/monitors/${m.id}/stats`);
+    expect(stats.body.daily.at(-1)).toMatchObject({ up: 2 });
+  });
+
+  it('withTimeout gives up on a hanging call', async () => {
+    await expect(withTimeout(new Promise(() => {}), 10)).rejects.toThrow('timed out');
+    await expect(withTimeout(Promise.resolve(1), 10)).resolves.toBe(1);
   });
 });
 
