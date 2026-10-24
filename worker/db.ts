@@ -114,6 +114,18 @@ export async function getMonitor(db: D1Database, id: number): Promise<Monitor | 
   );
 }
 
+/** D1 故障時一個呼叫可能卡幾十秒才失敗，等不了那麼久 */
+export const D1_TIMEOUT_MS = 10_000;
+
+/** 只是不再等，D1 那邊的呼叫不會被取消 */
+export function withTimeout<T>(promise: Promise<T>, ms = D1_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`D1 call timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function findPushMonitorId(db: D1Database, token: string): Promise<number | null> {
   const row = await db
     .prepare("SELECT id FROM monitors WHERE push_token = ? AND type = 'push' AND active = 1")
@@ -278,14 +290,19 @@ export interface HeartbeatWrite {
 }
 
 /**
- * 寫一筆心跳並累加當日統計。monitor 已刪除或停用時不寫，回傳 false，
- * 讓殘留的 DO 自己停掉 alarm。
+ * 寫入心跳並累加當日統計，整批一起成功或失敗。monitor 已刪除或停用時不寫；
+ * 最後一筆沒寫進去就回傳 false，讓殘留的 DO 自己停掉 alarm。
  */
-export async function writeHeartbeat(db: D1Database, hb: HeartbeatWrite): Promise<boolean> {
+export async function writeHeartbeats(db: D1Database, beats: HeartbeatWrite[]): Promise<boolean> {
+  const results = await db.batch(beats.flatMap((hb) => heartbeatStatements(db, hb)));
+  return (results.at(-2)!.meta.changes ?? 0) > 0;
+}
+
+function heartbeatStatements(db: D1Database, hb: HeartbeatWrite): D1PreparedStatement[] {
   const up = hb.status === 1 ? 1 : 0;
   const down = hb.status === 0 ? 1 : 0;
   const hasLatency = up === 1 && hb.latencyMs != null;
-  const [res] = await db.batch([
+  return [
     db
       .prepare(
         `INSERT INTO heartbeats (monitor_id, ts, status, latency_ms, msg, important)
@@ -303,8 +320,7 @@ export async function writeHeartbeat(db: D1Database, hb: HeartbeatWrite): Promis
            latency_count = latency_count + excluded.latency_count`,
       )
       .bind(hb.monitorId, hb.day, up, down, hasLatency ? hb.latencyMs : 0, hasLatency ? 1 : 0),
-  ]);
-  return (res!.meta.changes ?? 0) > 0;
+  ];
 }
 
 export async function listHeartbeats(

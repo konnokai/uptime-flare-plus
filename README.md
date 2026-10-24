@@ -134,6 +134,14 @@ curl "https://status.example.com/api/push/<token>?status=up&msg=OK&ping="
 - 任何 HTTP method 都可以。成功回 `{"ok":true}`，token 不存在或 monitor 已暫停回 404。
 - 超過「間隔 + 1 秒」沒收到 push，就依重試次數先標 pending，用完才標 down 並通知。
 
+## D1 故障時的行為
+
+D1 偶爾會整段時間回錯誤或卡住幾十秒。為了不誤報，也不讓請求一直等：
+
+- **push 不需要 D1**：token 對應的 monitor id 會存在 Cache API（每個機房各自一份），查得到就直接交給 DO，由 DO 比對 token。快取沒有才查 D1。所以 D1 故障時，已經 push 過的服務照樣能回報，不會被誤判成 down。快取只在同一個機房有效，而且官方文件只保證 custom domain 有作用。
+- **D1 呼叫有 timeout**：push 查 token、寫心跳、查通知頻道，超過 10 秒就不等了。D1 那邊的呼叫不會被取消，只是我們不等它。
+- **心跳先暫存**：寫心跳失敗時，DO 會先存起來，最多保留最新 500 筆。之後每次寫心跳順便補寫最舊的 100 筆。monitor 暫停期間不會寫心跳，暫存的要等恢復後才補。如果 D1 其實已經寫入、只是回應超過 timeout，這些心跳會被寫兩次。
+
 ## 已知限制
 
 - Workers 的 `fetch` 不能忽略 TLS 憑證錯誤，所以沒有「忽略 TLS」選項。
